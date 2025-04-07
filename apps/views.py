@@ -29,52 +29,53 @@ class ProductMaterialsAPIView(APIView):
         base_quantity = request.data.get("quantity")
         products = Product.objects.filter(product_code=product_code)
 
-        production_plan = []
-        if products.count() == 2:
-            prod_list = list(products)
-            production_plan.append({"product": prod_list[0], "multiplier": 3})
-            production_plan.append({"product": prod_list[1], "multiplier": 2})
-        else:
-            for product in products:
-                production_plan.append({"product": product, "multiplier": 1})
+        if not products.exists():
+            return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
 
         results = []
-        used_materials = {}
+        allocated_materials = {}
 
-        for plan in production_plan:
-            product = plan["product"]
-            multiplier = plan["multiplier"]
-            production_qty = base_quantity * multiplier
+        for product in products:
+            production_qty = base_quantity * product.multiplier if hasattr(product, 'multiplier') else base_quantity
 
-            product_materials = ProductMaterial.objects.filter(product=product).distinct()
-            materials_needed = {}
-            for pm in product_materials:
-                materials_needed[pm.material.id] = pm.quantity * production_qty
-
+            product_materials = ProductMaterial.objects.filter(product=product)
             warehouse_data = []
-            for material_id, required_qty in materials_needed.items():
+
+            for pm in product_materials:
+                material_id = pm.material.id
+                required_qty = pm.quantity * production_qty
+                material_name = pm.material.name
+
                 warehouses = Warehouse.objects.filter(material_id=material_id).order_by('id')
-                total_qty = 0
-                material_name = Material.objects.get(id=material_id).name
+                total_allocated = 0
 
                 for warehouse in warehouses:
-                    available_qty = warehouse.remainder - used_materials.get((material_id, warehouse.id), 0)
-                    if available_qty > 0 and total_qty < required_qty:
-                        qty_to_take = min(available_qty, required_qty - total_qty)
-                        total_qty += qty_to_take
+                    already_allocated = allocated_materials.get((material_id, warehouse.id), 0)
+                    available_qty = warehouse.remainder - already_allocated
+                    if available_qty <= 0:
+                        continue
+
+                    if total_allocated < required_qty:
+                        qty_to_allocate = min(available_qty, required_qty - total_allocated)
+                        total_allocated += qty_to_allocate
+
                         warehouse_data.append({
                             "warehouse_id": warehouse.id,
                             "material_name": material_name,
-                            "qty": qty_to_take,
+                            "qty": qty_to_allocate,
                             "price": warehouse.price
                         })
-                        used_materials[(material_id, warehouse.id)] = used_materials.get((material_id, warehouse.id), 0) + qty_to_take
 
-                if total_qty < required_qty:
+                        allocated_materials[(material_id, warehouse.id)] = already_allocated + qty_to_allocate
+
+                    if total_allocated >= required_qty:
+                        break
+
+                if total_allocated < required_qty:
                     warehouse_data.append({
                         "warehouse_id": None,
                         "material_name": material_name,
-                        "qty": required_qty - total_qty,
+                        "qty": required_qty - total_allocated,
                         "price": None
                     })
 
